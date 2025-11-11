@@ -1,0 +1,6 @@
+node_modules/
+.next/
+debug/summarizer.log
+.env
+.env.local
+
