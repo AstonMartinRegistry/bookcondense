@@ -44,7 +44,12 @@ export async function GET() {
     },
   );
 
-  return new NextResponse(pdfBuffer, {
+  const pdfArrayBuffer = pdfBuffer.buffer.slice(
+    pdfBuffer.byteOffset,
+    pdfBuffer.byteOffset + pdfBuffer.byteLength,
+  );
+
+  return new NextResponse(pdfArrayBuffer, {
     headers: {
       "Content-Type": "application/pdf",
       "Content-Disposition": 'attachment; filename="bad-character-test.pdf"',
