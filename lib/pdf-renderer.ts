@@ -182,19 +182,8 @@ export async function renderCondensedPdf(
 
   const pdfDoc = await PDFDocument.create();
   const timesRoman = await pdfDoc.embedFont(StandardFonts.TimesRoman);
-  let timesRomanBold;
-  let timesItalic;
-  try {
-    timesRomanBold = await pdfDoc.embedFont(StandardFonts.TimesBold);
-  } catch {
-    timesRomanBold = timesRoman;
-  }
-
-  try {
-    timesItalic = await pdfDoc.embedFont(StandardFonts.TimesItalic);
-  } catch {
-    timesItalic = timesRoman;
-  }
+  const timesRomanBold = await pdfDoc.embedFont(StandardFonts.TimesRoman);
+  const timesItalic = await pdfDoc.embedFont(StandardFonts.TimesRoman);
 
   // Cover page
   const coverPage = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
