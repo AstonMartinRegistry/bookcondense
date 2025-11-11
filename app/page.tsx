@@ -3,6 +3,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+type PageMeta = {
+  pageNumber: number;
+  wordCount: number;
+  preview: string;
+};
+
 type UiState =
   | { status: "idle" }
   | { status: "uploading" }
@@ -23,6 +29,15 @@ export default function HomePage() {
   );
   const [download, setDownload] = useState<{ url: string; filename: string } | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
+  const [metadataStatus, setMetadataStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [metadataError, setMetadataError] = useState<string | null>(null);
+  const [pagesMeta, setPagesMeta] = useState<PageMeta[] | null>(null);
+  const [selectedPages, setSelectedPages] = useState<number[]>([]);
+  const [rangeStart, setRangeStart] = useState<number | "">("");
+  const [rangeEnd, setRangeEnd] = useState<number | "">("");
+  const [rangeError, setRangeError] = useState<string | null>(null);
   const downloadLinkRef = useRef<HTMLAnchorElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -45,6 +60,123 @@ export default function HomePage() {
     };
   }, [download]);
 
+  const fetchPageMetadata = useCallback(async (pdf: File) => {
+    setMetadataStatus("loading");
+    setMetadataError(null);
+    setPagesMeta(null);
+    setSelectedPages([]);
+    setRangeStart("");
+    setRangeEnd("");
+    setRangeError(null);
+
+    const formData = new FormData();
+    formData.append("file", pdf);
+
+    try {
+      const response = await fetch("/api/pdf-metadata", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error =
+          (await response.json().catch(() => null)) ?? {
+            error: "Failed to inspect PDF.",
+          };
+        throw new Error(error.error ?? "Failed to inspect PDF.");
+      }
+
+      const data = (await response.json()) as {
+        pages: PageMeta[];
+      };
+
+      if (!data.pages || data.pages.length === 0) {
+        throw new Error(
+          "No readable pages were detected. Please upload a text-based PDF.",
+        );
+      }
+
+      setPagesMeta(data.pages);
+      setSelectedPages(data.pages.map((page) => page.pageNumber));
+      setMetadataStatus("ready");
+      setRangeStart(data.pages[0].pageNumber);
+      setRangeEnd(data.pages[data.pages.length - 1].pageNumber);
+      setRangeError(null);
+    } catch (error) {
+      setMetadataStatus("error");
+      setMetadataError((error as Error).message);
+    }
+  }, []);
+
+  const handlePageToggle = useCallback((pageNumber: number) => {
+    setSelectedPages((current) => {
+      if (current.includes(pageNumber)) {
+        return current.filter((value) => value !== pageNumber);
+      }
+      return [...current, pageNumber].sort((a, b) => a - b);
+    });
+  }, []);
+
+  const handleSelectAllPages = useCallback(() => {
+    if (!pagesMeta) return;
+    const allPages = pagesMeta.map((page) => page.pageNumber);
+    setSelectedPages(allPages);
+    if (pagesMeta.length > 0) {
+      setRangeStart(pagesMeta[0].pageNumber);
+      setRangeEnd(pagesMeta[pagesMeta.length - 1].pageNumber);
+    }
+    setRangeError(null);
+  }, [pagesMeta]);
+
+  const handleClearPages = useCallback(() => {
+    setSelectedPages([]);
+    setRangeError(null);
+  }, []);
+
+  const handleApplyRange = useCallback(() => {
+    if (!pagesMeta) return;
+
+    if (rangeStart === "" || rangeEnd === "") {
+      setRangeError("Enter both start and end pages.");
+      return;
+    }
+
+    const start = Number(rangeStart);
+    const end = Number(rangeEnd);
+
+    const firstPage = pagesMeta[0].pageNumber;
+    const lastPage = pagesMeta[pagesMeta.length - 1].pageNumber;
+
+    if (Number.isNaN(start) || Number.isNaN(end)) {
+      setRangeError("Page range must be numeric.");
+      return;
+    }
+
+    if (start > end) {
+      setRangeError("Start page must be less than or equal to end page.");
+      return;
+    }
+
+    if (start < firstPage || end > lastPage) {
+      setRangeError(
+        `Pages must be between ${firstPage} and ${lastPage}.`,
+      );
+      return;
+    }
+
+    const selection = pagesMeta
+      .map((page) => page.pageNumber)
+      .filter((pageNumber) => pageNumber >= start && pageNumber <= end);
+
+    if (selection.length === 0) {
+      setRangeError("No pages fall within that range.");
+      return;
+    }
+
+    setSelectedPages(selection);
+    setRangeError(null);
+  }, [pagesMeta, rangeEnd, rangeStart]);
+
   const reset = useCallback(() => {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
@@ -58,6 +190,10 @@ export default function HomePage() {
       return null;
     });
     setIsDragActive(false);
+    setMetadataStatus("idle");
+    setMetadataError(null);
+    setPagesMeta(null);
+    setSelectedPages([]);
   }, []);
 
   const handleDrop = useCallback(
@@ -74,8 +210,9 @@ export default function HomePage() {
 
       setFile(nextFile);
       setUiState({ status: "idle" });
+      fetchPageMetadata(nextFile);
     },
-    [],
+    [fetchPageMetadata],
   );
 
   const handleSubmit = useCallback(
@@ -86,6 +223,22 @@ export default function HomePage() {
         setUiState({
           status: "error",
           message: "Please select a PDF to condense.",
+        });
+        return;
+      }
+
+      if (metadataStatus !== "ready" || !pagesMeta) {
+        setUiState({
+          status: "error",
+          message: "Please wait for the PDF pages to finish analyzing.",
+        });
+        return;
+      }
+
+      if (selectedPages.length === 0) {
+        setUiState({
+          status: "error",
+          message: "Select at least one page to condense.",
         });
         return;
       }
@@ -104,6 +257,7 @@ export default function HomePage() {
         formData.append("file", file);
         formData.append("summaryDensity", String(summaryDensity));
         formData.append("quoteDensity", String(quoteDensity));
+        formData.append("selectedPages", JSON.stringify(selectedPages));
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
@@ -237,7 +391,7 @@ export default function HomePage() {
         setProgress({ processed: 0, total: 0 });
       }
     },
-    [file, quoteDensity, summaryDensity],
+    [file, metadataStatus, pagesMeta, quoteDensity, selectedPages, summaryDensity],
   );
 
   return (
@@ -302,6 +456,108 @@ export default function HomePage() {
             </p>
           </div>
 
+          {metadataStatus === "loading" && (
+            <div style={styles.metadataNotice}>
+              <p style={styles.statusText}>Analyzing pages…</p>
+            </div>
+          )}
+
+          {metadataStatus === "error" && metadataError && (
+            <p style={{ ...styles.statusText, color: "#d9534f" }}>
+              {metadataError}
+            </p>
+          )}
+
+          {metadataStatus === "ready" && pagesMeta && (
+            <div style={styles.pagePicker}>
+              <div style={styles.pagePickerHeader}>
+                <span style={styles.pagePickerTitle}>Select pages to condense</span>
+                <div style={styles.pagePickerActions}>
+                  <button
+                    type="button"
+                    style={styles.pagePickerButton}
+                    onClick={handleSelectAllPages}
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.pagePickerButton}
+                    onClick={handleClearPages}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <div style={styles.rangeControls}>
+                <label style={styles.rangeInputGroup}>
+                  <span style={styles.rangeLabel}>From</span>
+                  <input
+                    type="number"
+                    min={pagesMeta[0]?.pageNumber ?? 1}
+                    max={pagesMeta[pagesMeta.length - 1]?.pageNumber ?? undefined}
+                    value={rangeStart === "" ? "" : rangeStart}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setRangeStart(value === "" ? "" : Number(value));
+                    }}
+                    style={styles.rangeInput}
+                  />
+                </label>
+                <label style={styles.rangeInputGroup}>
+                  <span style={styles.rangeLabel}>To</span>
+                  <input
+                    type="number"
+                    min={pagesMeta[0]?.pageNumber ?? 1}
+                    max={pagesMeta[pagesMeta.length - 1]?.pageNumber ?? undefined}
+                    value={rangeEnd === "" ? "" : rangeEnd}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setRangeEnd(value === "" ? "" : Number(value));
+                    }}
+                    style={styles.rangeInput}
+                  />
+                </label>
+                <button
+                  type="button"
+                  style={styles.rangeApplyButton}
+                  onClick={handleApplyRange}
+                >
+                  Apply range
+                </button>
+              </div>
+              {rangeError && (
+                <p style={styles.rangeError}>{rangeError}</p>
+              )}
+              <div style={styles.pageList}>
+                {pagesMeta.map((page) => {
+                  const checked = selectedPages.includes(page.pageNumber);
+                  return (
+                    <label key={page.pageNumber} style={styles.pageItem}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => handlePageToggle(page.pageNumber)}
+                        style={styles.pageCheckbox}
+                      />
+                      <div style={styles.pageContent}>
+                        <div style={styles.pageMeta}>
+                          <span style={styles.pageMetaLabel}>
+                            Page {page.pageNumber}
+                          </span>
+                          <span style={styles.pageMetaInfo}>
+                            {page.wordCount} words
+                          </span>
+                        </div>
+                        <p style={styles.pagePreview}>{page.preview}</p>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div style={styles.controlsRow}>
             <div style={styles.sliderGroup}>
               <label style={styles.sliderLabel}>
@@ -341,7 +597,11 @@ export default function HomePage() {
             <button
               type="submit"
               style={styles.ctaButton}
-              disabled={uiState.status === "processing"}
+              disabled={
+                uiState.status === "processing" ||
+                metadataStatus !== "ready" ||
+                selectedPages.length === 0
+              }
             >
               {uiState.status === "processing" ? "Condensing…" : "Condense PDF"}
             </button>
@@ -503,6 +763,12 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "0.04em",
     textTransform: "uppercase",
   },
+  metadataNotice: {
+    border: "1px solid rgba(44,44,44,0.2)",
+    borderRadius: "10px",
+    padding: "1rem 1.25rem",
+    background: "#fbf8f2",
+  },
   controlsRow: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
@@ -522,6 +788,132 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "0.06em",
     textTransform: "uppercase",
     fontSize: "0.82rem",
+  },
+  pagePicker: {
+    border: "1px solid rgba(44,44,44,0.2)",
+    borderRadius: "12px",
+    padding: "1.25rem 1.4rem",
+    background: "#fbf8f2",
+    display: "flex",
+    flexDirection: "column",
+    gap: "1rem",
+  },
+  pagePickerHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "1rem",
+    flexWrap: "wrap",
+  },
+  pagePickerTitle: {
+    fontSize: "0.78rem",
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    fontWeight: 600,
+  },
+  pagePickerActions: {
+    display: "flex",
+    gap: "0.6rem",
+  },
+  pagePickerButton: {
+    border: "1px solid rgba(44,44,44,0.35)",
+    borderRadius: "999px",
+    padding: "0.45rem 1.2rem",
+    background: "transparent",
+    color: "#1b1b1b",
+    fontSize: "0.7rem",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    cursor: "pointer",
+  },
+  rangeControls: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(140px, auto))",
+    gap: "0.75rem",
+    alignItems: "end",
+  },
+  rangeInputGroup: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.35rem",
+  },
+  rangeLabel: {
+    fontSize: "0.7rem",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+  },
+  rangeInput: {
+    borderRadius: "12px",
+    border: "1px solid rgba(44,44,44,0.35)",
+    padding: "0.55rem 0.75rem",
+    fontSize: "0.85rem",
+    background: "#fff",
+  },
+  rangeApplyButton: {
+    border: "1px solid #1b1b1b",
+    borderRadius: "999px",
+    padding: "0.55rem 1.6rem",
+    background: "#1b1b1b",
+    color: "#f6f2e9",
+    fontSize: "0.75rem",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    cursor: "pointer",
+    fontFamily: "'Times New Roman', 'Iowan Old Style', serif",
+  },
+  rangeError: {
+    margin: 0,
+    color: "#d9534f",
+    fontSize: "0.7rem",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+  },
+  pageList: {
+    display: "grid",
+    gap: "0.75rem",
+    maxHeight: "240px",
+    overflowY: "auto",
+    paddingRight: "0.4rem",
+  },
+  pageItem: {
+    display: "grid",
+    gridTemplateColumns: "auto 1fr",
+    gap: "0.9rem",
+    padding: "0.6rem 0.4rem",
+    borderBottom: "1px solid rgba(44,44,44,0.12)",
+  },
+  pageCheckbox: {
+    width: "1rem",
+    height: "1rem",
+    marginTop: "0.3rem",
+    accentColor: "#1b1b1b",
+    cursor: "pointer",
+  },
+  pageContent: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.4rem",
+  },
+  pageMeta: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "0.75rem",
+    fontSize: "0.72rem",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+  },
+  pageMetaLabel: {
+    fontWeight: 600,
+  },
+  pageMetaInfo: {
+    color: "rgba(44,44,44,0.6)",
+  },
+  pagePreview: {
+    margin: 0,
+    fontSize: "0.8rem",
+    lineHeight: 1.5,
+    color: "rgba(44,44,44,0.85)",
   },
   actions: {
     display: "flex",

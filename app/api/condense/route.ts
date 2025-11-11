@@ -26,9 +26,28 @@ const percentSchema = (min: number, max: number, fallback: number) =>
     throw new Error("Value must be numeric.");
   }, z.number().min(min).max(max));
 
+const selectedPagesSchema = z
+  .union([z.string(), z.undefined(), z.null()])
+  .transform((value) => {
+    if (value === undefined || value === null || value === "") {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+      if (!Array.isArray(parsed)) return undefined;
+      return parsed
+        .map((entry) => Number(entry))
+        .filter((entry) => Number.isInteger(entry) && entry > 0);
+    } catch {
+      return undefined;
+    }
+  });
+
 const requestSchema = z.object({
   summaryDensity: percentSchema(10, 100, 70),
   quoteDensity: percentSchema(0, 100, 30),
+  selectedPages: selectedPagesSchema,
 });
 
 export const runtime = "nodejs";
@@ -69,6 +88,7 @@ export async function POST(req: Request) {
     const parsed = requestSchema.safeParse({
       summaryDensity: formData.get("summaryDensity"),
       quoteDensity: formData.get("quoteDensity"),
+      selectedPages: formData.get("selectedPages"),
     });
 
     if (!parsed.success) {
@@ -81,7 +101,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { summaryDensity, quoteDensity } = parsed.data;
+    const { summaryDensity, quoteDensity, selectedPages } = parsed.data;
 
     const pdfBuffer = Buffer.from(await fileEntry.arrayBuffer());
 
@@ -109,6 +129,21 @@ export async function POST(req: Request) {
         },
         { status: 422 },
       );
+    }
+
+    if (selectedPages && selectedPages.length > 0) {
+      const selection = new Set(selectedPages);
+      pages = pages.filter((page) => selection.has(page.pageNumber));
+
+      if (pages.length === 0) {
+        return NextResponse.json(
+          {
+            error:
+              "None of the selected pages contained readable text. Try choosing different pages.",
+          },
+          { status: 400 },
+        );
+      }
     }
 
     const encoder = new TextEncoder();
